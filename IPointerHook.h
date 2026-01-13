@@ -95,9 +95,9 @@ public:
 
     uintptr_t GetElfBase() const { return GetElfBaseImpl(); }
 
-    uintptr_t GetOrigPtrAddr() const { return GetPtrAddrImpl(); }
+    uintptr_t GetOrigPtrAddr() const { return orig_ptr_addr_; }
 
-    uintptr_t GetOrigFuncAddr() const { return GetFuncAddrImpl(); }
+    uintptr_t GetOrigFuncAddr() const { return orig_func_addr_; }
 
     uintptr_t GetFakeFuncAddr() const { return fake_func_addr_; }
 
