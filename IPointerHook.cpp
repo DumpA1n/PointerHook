@@ -2,18 +2,29 @@
 
 #include <sys/mman.h>
 
-#include "xHook/xh_util.h"
+#include "KittyMemory/KittyMemory.hpp"
 #include "Logger.h"
 
-std::shared_mutex IPointerHook::g_Mutex_;
-std::unordered_map<uint32_t, IPointerHook*> IPointerHook::g_Hacks_;
+#define MAKE_CRASH()     \
+    __asm__ volatile (   \
+        "mov x0, xzr;"   \
+        "mov x29, x0;"   \
+        "mov sp, x0;"    \
+        "br x0;"         \
+        : : :            \
+    );
+
+std::array<std::atomic<IPointerHook*>, IPointerHook::MAX_HOOKS> IPointerHook::g_Hacks_{};
+std::atomic<uint32_t> IPointerHook::g_Index_{0};
 
 IPointerHook::IPointerHook()
-    : initialized_(false),
-      index_(-1),
-      orig_ptr_addr_(0),
-      orig_func_addr_(0),
-      fake_func_addr_(0)
+    : initialized_(false)
+    , prepared_(false)
+    , installed_(false)
+    , index_(0)
+    , orig_ptr_addr_(0)
+    , orig_func_addr_(0)
+    , fake_func_addr_(0)
 {
 }
 
@@ -29,17 +40,11 @@ void IPointerHook::Initialize()
     if (GetFuncAddrImpl()) {
         orig_func_addr_ = GetFuncAddrImpl();
     } else {
-        uint32_t prot = 0;
-        xh_util_get_addr_protect(orig_ptr_addr_, NULL, &prot);
-        if (prot & PROT_READ) {
-            if (uintptr_t temp = *(uintptr_t*)orig_ptr_addr_; temp != 0) {
-                orig_func_addr_ = temp;
-            } else {
-                LOGE("[%s] Failed to initialize: orig_func_addr_ is null", GetName().c_str());
-                return;
-            }
+        uintptr_t temp = 0;
+        if (KittyMemory::memRead((void *)orig_ptr_addr_, &temp, sizeof(uintptr_t)) && temp != 0) {
+            orig_func_addr_ = temp;
         } else {
-            LOGE("[%s] Failed to initialize: cannot read orig_ptr_addr_", GetName().c_str());
+            LOGE("[%s] Failed to initialize: orig_func_addr_ is null", GetName().c_str());
             return;
         }
     }
@@ -49,20 +54,16 @@ void IPointerHook::Initialize()
     LOGI("[%s] Initialized", GetName().c_str());
 }
 
-void IPointerHook::InstallHook()
+bool IPointerHook::PrepareTrampoline()
 {
     if (!initialized_) {
-        return;
+        return false;
     }
 
     void *mapped_address = x_mmap(4096);
     LOGI("[%s] mmap: %p", GetName().c_str(), mapped_address);
 
-    {
-        std::unique_lock lock(g_Mutex_);
-        index_ = g_Hacks_.size();
-        g_Hacks_[index_] = this;
-    }
+    index_ = g_Index_.fetch_add(1);
 
     uintptr_t addr = (uintptr_t)mapped_address;
 
@@ -96,7 +97,28 @@ void IPointerHook::InstallHook()
 
     fake_func_addr_ = addr;
 
-    x_write((void*)orig_ptr_addr_, &fake_func_addr_, sizeof(uintptr_t));
+    return true;
+}
+
+void IPointerHook::InstallHook()
+{
+    if (!prepared_ && PrepareTrampoline()) {
+        prepared_ = true;
+    }
+
+    if (index_ >= MAX_HOOKS) {
+        LOGE("[%s] InstallHook failed: index %u exceeds MAX_HOOKS %zu", GetName().c_str(), index_, MAX_HOOKS);
+        return;
+    }
+
+    g_Hacks_[index_].store(this, std::memory_order_release);
+
+    if (!KittyMemory::memWrite((void*)orig_ptr_addr_, &fake_func_addr_, sizeof(uintptr_t))) {
+        LOGE("[%s] InstallHook failed: memWrite error at %p", GetName().c_str(), (void*)orig_ptr_addr_);
+        return;
+    }
+
+    installed_ = true;
 
     LOGI("[%s] InstallHook: orig_ptr_addr_: %p, orig_func_addr_: %p, fake_func_addr_: %p",
         GetName().c_str(),
@@ -105,22 +127,34 @@ void IPointerHook::InstallHook()
         (void*)fake_func_addr_);
 }
 
+void IPointerHook::RestoreHook()
+{
+    if (installed_) {
+        if (!KittyMemory::memWrite((void*)orig_ptr_addr_, &orig_func_addr_, sizeof(uintptr_t))) {
+            LOGE("[%s] RestoreHook failed: memWrite error at %p", GetName().c_str(), (void*)orig_ptr_addr_);
+        }
+
+        installed_ = false;
+
+        LOGI("[%s] RestoreHook", GetName().c_str());
+    }
+}
+
 void IPointerHook::DestroyHook()
 {
     if (initialized_) {
-        x_write((void*)orig_ptr_addr_, &orig_func_addr_, sizeof(uintptr_t));
-        x_munmap((void*)fake_func_addr_, 4096);
-        {
-            std::unique_lock lock(g_Mutex_);
-            g_Hacks_.erase(index_);
+        if (!KittyMemory::memWrite((void*)orig_ptr_addr_, &orig_func_addr_, sizeof(uintptr_t))) {
+            LOGE("[%s] DestroyHook failed: memWrite error at %p", GetName().c_str(), (void*)orig_ptr_addr_);
         }
-        index_ = -1;
+        x_munmap((void*)fake_func_addr_, 4096);
+        if (index_ < MAX_HOOKS) {
+            g_Hacks_[index_].store(nullptr, std::memory_order_release);
+        }
+        index_ = 0;
         orig_ptr_addr_ = 0;
         orig_func_addr_ = 0;
         fake_func_addr_ = 0;
         initialized_ = false;
-
-        LOGI("[%s] DestroyHook", GetName().c_str());
     }
 }
 
@@ -143,27 +177,16 @@ bool IPointerHook::x_munmap(void *addr, size_t size)
     return true;
 }
 
-void IPointerHook::x_write(void *dst, const void *src, size_t size)
-{
-    uint32_t prot = 0;
-    xh_util_get_addr_protect((uintptr_t)dst, NULL, &prot);
-    if (prot & PROT_WRITE) {
-        memcpy(dst, src, size);
-    } else {
-        xh_util_set_addr_protect((uintptr_t)dst, prot | PROT_WRITE);
-        memcpy(dst, src, size);
-        xh_util_set_addr_protect((uintptr_t)dst, prot);
-    }
-}
-
 uintptr_t IPointerHook::Dispatcher(RegContext *ctx, uint32_t index)
 {
-    uintptr_t return_address = 0;
-    {
-        std::shared_lock lock(g_Mutex_);
-        if (auto it = g_Hacks_.find(index); it != g_Hacks_.end()) {
-            return_address = it->second->FakeFunction(ctx);
-        }
+    if (index >= MAX_HOOKS) {
+        return 0;
     }
-    return return_address;
+
+    IPointerHook* hook = g_Hacks_[index].load(std::memory_order_acquire);
+    if (hook == nullptr) {
+        return 0;
+    }
+
+    return hook->FakeFunction(ctx);
 }

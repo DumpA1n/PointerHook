@@ -5,28 +5,31 @@
 
 #include "IPointerHook.h"
 
-class SafePointerHook : virtual public IPointerHook {
+class SafePointerHook : virtual public IPointerHook
+{
 public:
     SafePointerHook() : IPointerHook() {}
-    virtual ~SafePointerHook() override {
-        IPointerHook::~IPointerHook();
-    }
+    virtual ~SafePointerHook() override = default;
 
-    void InstallHook() override {
+    void InstallHook() override
+    {
         IPointerHook::InstallHook();
         // TODO: 添加过检测逻辑
     }
 
-    void DestroyHook() override {
+    void DestroyHook() override
+    {
         IPointerHook::DestroyHook();
     }
 
 protected:
-    void *x_mmap(size_t size) override {
+    void *x_mmap(size_t size) override
+    {
         return IPointerHook::x_mmap(size);
     }
 
-    bool x_munmap(void *addr, size_t size) override {
+    bool x_munmap(void *addr, size_t size) override
+    {
         return IPointerHook::x_munmap(addr, size);
     }
 };

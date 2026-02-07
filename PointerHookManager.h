@@ -7,18 +7,22 @@
 #include "IPointerHook.h"
 #include "Logger.h"
 
-class PointerHookManager {
+// TODO: 添加开关机制，而非每次都重新构造
+class PointerHookManager
+{
 public:
     PointerHookManager(const PointerHookManager&) = delete;
     PointerHookManager& operator=(const PointerHookManager&) = delete;
 
-    static PointerHookManager& GetInstance() {
+    static PointerHookManager& GetInstance()
+    {
         static PointerHookManager gInstance;
         return gInstance;
     }
 
     template<class T, class... Args, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
-    void Add(Args&&... args) {
+    void Add(Args&&... args)
+    {
         std::type_index idx(typeid(T));
 
         auto [it, inserted] = m_hookMap.try_emplace(idx, nullptr);
@@ -36,7 +40,8 @@ public:
     }
 
     template<class T, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
-    void Remove() {
+    void Remove()
+    {
         std::type_index idx(typeid(T));
         if (auto it = m_hookMap.find(idx); it != m_hookMap.end()) {
             LOGI("[PointerHookManager] Remove: %s", it->second->GetName().c_str());

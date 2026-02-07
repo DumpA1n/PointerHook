@@ -26,11 +26,6 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_link_options(-Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL)
 endif()
 
-# TODO: Remove xHook dependency
-file(GLOB XHOOK_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/xHook/*.c
-)
-
 file(GLOB KITTY_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/KittyMemory/*.cpp
 )
@@ -39,7 +34,6 @@ add_library(${PROJECT_NAME} SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/example.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IPointerHook.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/trampoline.s
-    ${XHOOK_SOURCES}
     ${KITTY_SOURCES}
 )
 
