@@ -28,15 +28,25 @@ struct RegContext {
             double d2;
         } d;
         struct {
-            float f1;
+            float f1;  // == Arm64 sN (low 32 bits of qN)
             float f2;
             float f3;
             float f4;
         } f;
     };
 
+    // Proxy so that s[n] correctly accesses the low 32 bits of qN (Arm64 sN register).
+    // The old `float s[32]` was wrong: it mapped s[n] -> q[n/4].f.f{n%4+1},
+    // but Arm64 sN is always the low 32 bits of qN, i.e. q[n].f.f1.
+    struct SRegView {
+        FPReg data[32];
+        float&       operator[](size_t n)       { return data[n].f.f1; }
+        const float& operator[](size_t n) const { return data[n].f.f1; }
+    };
+    static_assert(sizeof(SRegView) == sizeof(FPReg[32]), "SRegView size mismatch");
+
     union {
-        float s[32];
+        SRegView s;  // s[n] == q[n].f.f1 == Arm64 sN
         FPReg q[32];
         struct {
         FPReg q0, q1, q2, q3, q4, q5, q6, q7;
