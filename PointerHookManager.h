@@ -7,7 +7,6 @@
 #include "IPointerHook.h"
 #include "Logger.h"
 
-// TODO: 添加开关机制，而非每次都重新构造
 class PointerHookManager
 {
 public:
@@ -51,6 +50,80 @@ public:
         }
     }
 
+    template<class T, class... Args, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
+    void Enable(Args&&... args)
+    {
+        std::type_index idx(typeid(T));
+        if (auto it = m_hookMap.find(idx); it != m_hookMap.end()) {
+            LOGI("[PointerHookManager] Enable: %s", it->second->GetName().c_str());
+            it->second->InstallHook();
+        } else {
+            LOGI("[PointerHookManager] Hook %s not found", idx.name());
+        }
+    }
+
+    template<class T, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
+    void Disable()
+    {
+        std::type_index idx(typeid(T));
+        if (auto it = m_hookMap.find(idx); it != m_hookMap.end()) {
+            LOGI("[PointerHookManager] Disable: %s", it->second->GetName().c_str());
+            it->second->RestoreHook();
+        } else {
+            LOGI("[PointerHookManager] Hook %s not found", idx.name());
+        }
+    }
+
+    template<class T, class... Args, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
+    void AddByName(const std::string& name, Args&&... args)
+    {
+        auto [it, inserted] = m_namedHookMap.try_emplace(name, nullptr);
+        if (!inserted) {
+            LOGI("[PointerHookManager] Named hook %s already exists", name.c_str());
+            return;
+        }
+
+        auto hack = std::make_unique<T>(std::forward<Args>(args)...);
+        hack->Initialize();
+        hack->InstallHook();
+
+        LOGI("[PointerHookManager] AddByName: %s", hack->GetName().c_str());
+        it->second = std::move(hack);
+    }
+
+    void RemoveByName(const std::string& name)
+    {
+        auto it = m_namedHookMap.find(name);
+        if (it != m_namedHookMap.end()) {
+            LOGI("[PointerHookManager] RemoveByName: %s", it->second->GetName().c_str());
+            m_namedHookMap.erase(it);
+        } else {
+            LOGI("[PointerHookManager] Named hook %s not found", name.c_str());
+        }
+    }
+
+    void EnableByName(const std::string& name)
+    {
+        auto it = m_namedHookMap.find(name);
+        if (it != m_namedHookMap.end()) {
+            LOGI("[PointerHookManager] EnableByName: %s", it->second->GetName().c_str());
+            it->second->InstallHook();
+        } else {
+            LOGI("[PointerHookManager] Named hook %s not found", name.c_str());
+        }
+    }
+
+    void DisableByName(const std::string& name)
+    {
+        auto it = m_namedHookMap.find(name);
+        if (it != m_namedHookMap.end()) {
+            LOGI("[PointerHookManager] DisableByName: %s", it->second->GetName().c_str());
+            it->second->RestoreHook();
+        } else {
+            LOGI("[PointerHookManager] Named hook %s not found", name.c_str());
+        }
+    }
+
 protected:
     PointerHookManager() {}
     ~PointerHookManager() {}
@@ -58,4 +131,5 @@ protected:
 private:
     std::shared_mutex m_mutex;
     std::unordered_map<std::type_index, std::unique_ptr<IPointerHook>> m_hookMap;
+    std::unordered_map<std::string, std::unique_ptr<IPointerHook>> m_namedHookMap;
 };
