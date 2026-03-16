@@ -28,25 +28,29 @@ struct RegContext {
             double d2;
         } d;
         struct {
-            float f1;  // == Arm64 sN (low 32 bits of qN)
+            float f1;
             float f2;
             float f3;
             float f4;
         } f;
     };
+    static_assert(sizeof(FPReg) == 16, "FPReg size mismatch");
 
-    // Proxy so that s[n] correctly accesses the low 32 bits of qN (Arm64 sN register).
-    // The old `float s[32]` was wrong: it mapped s[n] -> q[n/4].f.f{n%4+1},
-    // but Arm64 sN is always the low 32 bits of qN, i.e. q[n].f.f1.
     struct SRegView {
         FPReg data[32];
         float&       operator[](size_t n)       { return data[n].f.f1; }
         const float& operator[](size_t n) const { return data[n].f.f1; }
     };
-    static_assert(sizeof(SRegView) == sizeof(FPReg[32]), "SRegView size mismatch");
+
+    struct DRegView {
+        FPReg data[32];
+        double&       operator[](size_t n)       { return data[n].d.d1; }
+        const double& operator[](size_t n) const { return data[n].d.d1; }
+    };
 
     union {
         SRegView s;  // s[n] == q[n].f.f1 == Arm64 sN
+        DRegView d;  // d[n] == q[n].d.d1 == Arm64 dN
         FPReg q[32];
         struct {
         FPReg q0, q1, q2, q3, q4, q5, q6, q7;
@@ -73,7 +77,7 @@ struct RegContext {
 
     uint64_t _pad;
 
-    std::string toString() const
+    std::string ToString() const
     {
         std::string result;
         for (int i = 0; i < 29; i++) {
