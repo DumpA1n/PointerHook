@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.22.1)
 
 if(DEFINED ENV{NDK_HOME})
-    set(ANDROID_PLATFORM 27)
+    set(ANDROID_PLATFORM 21)
     set(ANDROID_ABI arm64-v8a)
-    set(CMAKE_TOOLCHAIN_FILE "$ENV{NDK_HOME}/build/cmake/android.toolchain.cmake")
+    file(TO_CMAKE_PATH "$ENV{NDK_HOME}" NDK_HOME_CMAKE)
+    set(CMAKE_TOOLCHAIN_FILE "${NDK_HOME_CMAKE}/build/cmake/android.toolchain.cmake")
 else()
     message(FATAL_ERROR "NDK_HOME environment variable not set. Please set it to the path of your Android NDK.")
 endif()
@@ -19,20 +20,21 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_link_options(-Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL)
 endif()
 
-file(GLOB KITTY_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/KittyMemory/*.cpp
+file(GLOB ASM_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/ph_arm64_glue.s
+    ${CMAKE_CURRENT_SOURCE_DIR}/ph_trampoline_pool.s
 )
 
-add_library(${PROJECT_NAME} SHARED 
+add_library(${PROJECT_NAME}_asm OBJECT ${ASM_SOURCES})
+set_target_properties(${PROJECT_NAME}_asm PROPERTIES EXPORT_COMPILE_COMMANDS OFF)
+
+add_library(${PROJECT_NAME} SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/example.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IPointerHook.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/trampoline.s
-    ${KITTY_SOURCES}
+    $<TARGET_OBJECTS:${PROJECT_NAME}_asm>
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    kNO_KEYSTONE
-    kANDROID_LOG
     kANDROID_LOG_TAG="INJECT"
     kPROJECT_NAME="${PROJECT_NAME}"
 )

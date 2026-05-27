@@ -1,14 +1,42 @@
 #pragma once
 
-#include <typeindex>
-#include <shared_mutex>
+#include <concepts>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <typeinfo>
 #include <unordered_map>
 
 #include "IPointerHook.h"
-#include "Logger.h"
+#include <android/log.h>
+
+#ifndef kANDROID_LOG_TAG
+#define kANDROID_LOG_TAG "PtrHook"
+#endif
+
+#define PH_LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO,  kANDROID_LOG_TAG, __VA_ARGS__))
+#define PH_LOGE(...) ((void)__android_log_print(ANDROID_LOG_ERROR, kANDROID_LOG_TAG, __VA_ARGS__))
+
+// Thread-safe via a single internal mutex held across map lookup + hook
+// state transition. No explicit destroy verb — Restore toggles off but
+// keeps the instance for trampoline reuse; the destructor walks the map
+// and restores every slot at process exit / dlclose.
 
 class PointerHookManager
 {
+    struct StringHash {
+        using is_transparent = void;
+        size_t operator()(std::string_view sv) const noexcept {
+            return std::hash<std::string_view>{}(sv);
+        }
+        size_t operator()(const std::string& s) const noexcept {
+            return std::hash<std::string_view>{}(s);
+        }
+        size_t operator()(const char* s) const noexcept {
+            return std::hash<std::string_view>{}(s);
+        }
+    };
+
 public:
     PointerHookManager(const PointerHookManager&) = delete;
     PointerHookManager& operator=(const PointerHookManager&) = delete;
@@ -19,117 +47,65 @@ public:
         return gInstance;
     }
 
-    template<class T, class... Args, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
-    void Add(Args&&... args)
+    template<class T, class... Args>
+        requires std::derived_from<T, IPointerHook>
+    void Install(Args&&... args)
     {
-        std::type_index idx(typeid(T));
+        InstallNamed<T>(typeid(T).name(), std::forward<Args>(args)...);
+    }
 
-        auto [it, inserted] = m_hookMap.try_emplace(idx, nullptr);
-        if (!inserted) {
-            LOGI("[PointerHookManager] Hook %s already exists", it->second->GetName().c_str());
+    template<class T, class... Args>
+        requires std::derived_from<T, IPointerHook>
+    void InstallNamed(std::string name, Args&&... args)
+    {
+        if (!IPointerHook::PassedSelfTest()) {
+            PH_LOGE("[PointerHookManager] Refusing Install(%s): SelfTest did not pass", name.c_str());
             return;
         }
 
-        auto hack = std::make_unique<T>(std::forward<Args>(args)...);
-        hack->Initialize();
-        hack->InstallHook();
+        std::lock_guard<std::mutex> guard(m_mtx_);
 
-        LOGI("[PointerHookManager] Add: %s", hack->GetName().c_str());
-        it->second = std::move(hack);
-    }
-
-    template<class T, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
-    void Remove()
-    {
-        std::type_index idx(typeid(T));
-        if (auto it = m_hookMap.find(idx); it != m_hookMap.end()) {
-            LOGI("[PointerHookManager] Remove: %s", it->second->GetName().c_str());
-            m_hookMap.erase(it);
-        } else {
-            LOGI("[PointerHookManager] Hook %s not found", idx.name());
-        }
-    }
-
-    template<class T, class... Args, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
-    void Enable(Args&&... args)
-    {
-        std::type_index idx(typeid(T));
-        if (auto it = m_hookMap.find(idx); it != m_hookMap.end()) {
-            LOGI("[PointerHookManager] Enable: %s", it->second->GetName().c_str());
-            it->second->InstallHook();
-        } else {
-            LOGI("[PointerHookManager] Hook %s not found", idx.name());
-        }
-    }
-
-    template<class T, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
-    void Disable()
-    {
-        std::type_index idx(typeid(T));
-        if (auto it = m_hookMap.find(idx); it != m_hookMap.end()) {
-            LOGI("[PointerHookManager] Disable: %s", it->second->GetName().c_str());
-            it->second->RestoreHook();
-        } else {
-            LOGI("[PointerHookManager] Hook %s not found", idx.name());
-        }
-    }
-
-    template<class T, class... Args, std::enable_if_t<std::is_base_of_v<IPointerHook, T>, int> = 0>
-    void AddByName(const std::string& name, Args&&... args)
-    {
-        auto [it, inserted] = m_namedHookMap.try_emplace(name, nullptr);
-        if (!inserted) {
-            LOGI("[PointerHookManager] Named hook %s already exists", name.c_str());
+        if (auto it = m_hooks.find(name); it != m_hooks.end()) {
+            PH_LOGI("[PointerHookManager] Install (re-install): %s", it->second->GetName().c_str());
+            it->second->Install();
             return;
         }
 
-        auto hack = std::make_unique<T>(std::forward<Args>(args)...);
-        hack->Initialize();
-        hack->InstallHook();
+        auto hook = std::make_unique<T>(std::forward<Args>(args)...);
+        hook->Resolve();
+        hook->Install();
 
-        LOGI("[PointerHookManager] AddByName: %s", hack->GetName().c_str());
-        it->second = std::move(hack);
+        PH_LOGI("[PointerHookManager] Install: %s (key=%s)", hook->GetName().c_str(), name.c_str());
+        m_hooks.emplace(std::move(name), std::move(hook));
     }
 
-    void RemoveByName(const std::string& name)
+    template<class T>
+        requires std::derived_from<T, IPointerHook>
+    void Restore()
     {
-        auto it = m_namedHookMap.find(name);
-        if (it != m_namedHookMap.end()) {
-            LOGI("[PointerHookManager] RemoveByName: %s", it->second->GetName().c_str());
-            m_namedHookMap.erase(it);
-        } else {
-            LOGI("[PointerHookManager] Named hook %s not found", name.c_str());
-        }
+        RestoreNamed(typeid(T).name());
     }
 
-    void EnableByName(const std::string& name)
+    void RestoreNamed(std::string_view name)
     {
-        auto it = m_namedHookMap.find(name);
-        if (it != m_namedHookMap.end()) {
-            LOGI("[PointerHookManager] EnableByName: %s", it->second->GetName().c_str());
-            it->second->InstallHook();
-        } else {
-            LOGI("[PointerHookManager] Named hook %s not found", name.c_str());
-        }
-    }
+        std::lock_guard<std::mutex> guard(m_mtx_);
 
-    void DisableByName(const std::string& name)
-    {
-        auto it = m_namedHookMap.find(name);
-        if (it != m_namedHookMap.end()) {
-            LOGI("[PointerHookManager] DisableByName: %s", it->second->GetName().c_str());
-            it->second->RestoreHook();
-        } else {
-            LOGI("[PointerHookManager] Named hook %s not found", name.c_str());
+        auto it = m_hooks.find(name);
+        if (it == m_hooks.end()) {
+            PH_LOGE("[PointerHookManager] Restore: key '%.*s' not found",
+                 (int)name.size(), name.data());
+            return;
         }
+        PH_LOGI("[PointerHookManager] Restore: %s", it->second->GetName().c_str());
+        it->second->Restore();
     }
 
 protected:
-    PointerHookManager() {}
-    ~PointerHookManager() {}
+    PointerHookManager() { IPointerHook::SelfTest(); }
+    ~PointerHookManager() = default;
 
 private:
-    std::shared_mutex m_mutex;
-    std::unordered_map<std::type_index, std::unique_ptr<IPointerHook>> m_hookMap;
-    std::unordered_map<std::string, std::unique_ptr<IPointerHook>> m_namedHookMap;
+    std::mutex m_mtx_;
+    std::unordered_map<std::string, std::unique_ptr<IPointerHook>,
+                       StringHash, std::equal_to<>> m_hooks;
 };
