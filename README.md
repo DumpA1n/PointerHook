@@ -1,3 +1,3 @@
 # PointerHook
 
-## For AArch64
+## For Android AArch64
